@@ -3,6 +3,7 @@ import logging
 import json
 import os
 import re
+import time
 from datetime import datetime
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command, CommandObject
@@ -31,6 +32,7 @@ class ReputationDB:
     
     def __init__(self):
         self.data = self._load_data()
+        self.fix_old_data()
     
     def _load_data(self):
         """Загружаем данные из файла"""
@@ -55,9 +57,61 @@ class ReputationDB:
                 "minus": 0,     # Отрицательные оценки
                 "username": None,
                 "first_name": None,
-                "last_update": datetime.now().isoformat()
+                "last_update": datetime.now().isoformat(),
+                "last_given_rep": {}  # Храним время последней выданной репутации
             }
+        else:
+            # Гарантируем, что у существующих пользователей есть все ключи
+            user = self.data[user_id]
+            if "plus" not in user:
+                user["plus"] = 0
+            if "minus" not in user:
+                user["minus"] = 0
+            if "username" not in user:
+                user["username"] = None
+            if "first_name" not in user:
+                user["first_name"] = None
+            if "last_update" not in user:
+                user["last_update"] = datetime.now().isoformat()
+            if "last_given_rep" not in user:
+                user["last_given_rep"] = {}
+        
         return self.data[user_id]
+    
+    def can_give_rep(self, from_user_id: str, to_user_id: str) -> tuple:
+        """
+        Проверяем, может ли пользователь дать репутацию другому
+        Возвращает: (может_дать, оставшееся_время_в_секундах, последнее_время)
+        """
+        user = self.get_user(from_user_id)
+        last_given = user.get("last_given_rep", {})
+        
+        # Получаем время последней выданной репутации этому пользователю
+        last_time = last_given.get(to_user_id, 0)
+        current_time = time.time()
+        
+        # КД 1 час = 3600 секунд
+        cooldown = 3600
+        
+        if last_time == 0:  # Никогда не давал репутацию этому пользователю
+            return True, 0, last_time
+        
+        time_passed = current_time - last_time
+        
+        if time_passed >= cooldown:
+            return True, 0, last_time
+        else:
+            time_left = cooldown - time_passed
+            return False, time_left, last_time
+    
+    def update_rep_time(self, from_user_id: str, to_user_id: str):
+        """Обновляем время последней выданной репутации"""
+        user = self.get_user(from_user_id)
+        if "last_given_rep" not in user:
+            user["last_given_rep"] = {}
+        
+        user["last_given_rep"][to_user_id] = time.time()
+        self._save_data()
     
     def update_user_info(self, user_id: str, username: str = None, first_name: str = None):
         """Обновляем информацию о пользователе"""
@@ -72,17 +126,25 @@ class ReputationDB:
     def add_plus(self, user_id: str):
         """Добавляем +rep"""
         user = self.get_user(user_id)
-        user["plus"] = user.get("plus", 0) + 1
+        current_plus = user.get("plus", 0)
+        current_minus = user.get("minus", 0)
+        
+        user["plus"] = current_plus + 1
         user["last_update"] = datetime.now().isoformat()
         self._save_data()
+        
         return user["plus"], user["minus"]
     
     def add_minus(self, user_id: str):
         """Добавляем -rep"""
         user = self.get_user(user_id)
-        user["minus"] = user.get("minus", 0) + 1
+        current_plus = user.get("plus", 0)
+        current_minus = user.get("minus", 0)
+        
+        user["minus"] = current_minus + 1
         user["last_update"] = datetime.now().isoformat()
         self._save_data()
+        
         return user["plus"], user["minus"]
     
     def find_by_username(self, username: str):
@@ -92,6 +154,46 @@ class ReputationDB:
             if user_data.get("username") and user_data["username"].lower() == username:
                 return user_id, user_data
         return None, None
+    
+    def fix_old_data(self):
+        """Исправляем старые данные, если они в неправильном формате"""
+        fixed = False
+        for user_id, user_data in list(self.data.items()):
+            if not isinstance(user_data, dict):
+                self.data[user_id] = {
+                    "plus": 0,
+                    "minus": 0,
+                    "username": None,
+                    "first_name": None,
+                    "last_update": datetime.now().isoformat(),
+                    "last_given_rep": {}
+                }
+                fixed = True
+            else:
+                if "plus" not in user_data:
+                    user_data["plus"] = 0
+                    fixed = True
+                if "minus" not in user_data:
+                    user_data["minus"] = 0
+                    fixed = True
+                if "username" not in user_data:
+                    user_data["username"] = None
+                    fixed = True
+                if "first_name" not in user_data:
+                    user_data["first_name"] = None
+                    fixed = True
+                if "last_update" not in user_data:
+                    user_data["last_update"] = datetime.now().isoformat()
+                    fixed = True
+                if "last_given_rep" not in user_data:
+                    user_data["last_given_rep"] = {}
+                    fixed = True
+        
+        if fixed:
+            self._save_data()
+            logger.info("Исправлены старые данные в базе репутации")
+        
+        return fixed
 
 
 class BansDB:
@@ -244,6 +346,27 @@ def format_profile(user_id: str, user_data: dict) -> str:
     )
 
 
+def format_cooldown_time(from_user_id: str, to_user_id: str) -> str:
+    """Форматирует информацию о кулдауне"""
+    can_give, time_left, last_time = rep_db.can_give_rep(from_user_id, to_user_id)
+    
+    if can_give:
+        return "✅ Можно дать репутацию"
+    else:
+        hours = int(time_left // 3600)
+        minutes = int((time_left % 3600) // 60)
+        seconds = int(time_left % 60)
+        
+        time_str = ""
+        if hours > 0:
+            time_str += f"{hours}ч "
+        if minutes > 0:
+            time_str += f"{minutes}м "
+        time_str += f"{seconds}с"
+        
+        return f"⏳ Кулдаун: {time_str}"
+
+
 # =================== ОБРАБОТЧИКИ КОМАНД ===================
 
 @dp.message(Command("start"))
@@ -362,6 +485,33 @@ async def add_plus_rep(message: types.Message):
         await message.reply("❗ <b>Нельзя изменять репутацию самому себе.</b>", parse_mode="HTML")
         return
     
+    # Проверяем КД
+    can_give, time_left, last_time = rep_db.can_give_rep(str(sender_user.id), str(target_user.id))
+    
+    if not can_give:
+        # Форматируем оставшееся время
+        hours = int(time_left // 3600)
+        minutes = int((time_left % 3600) // 60)
+        seconds = int(time_left % 60)
+        
+        time_str = ""
+        if hours > 0:
+            time_str += f"{hours}ч "
+        if minutes > 0:
+            time_str += f"{minutes}м "
+        if seconds > 0 or (hours == 0 and minutes == 0):
+            time_str += f"{seconds}с"
+        
+        await message.reply(
+            f"⏳ <b>Кулдаун!</b>\n\n"
+            f"Вы уже давали репутацию этому пользователю.\n"
+            f"Следующую репутацию можно будет дать через:\n"
+            f"<b>{time_str}</b>\n\n"
+            f"⏰ Кулдаун: 1 час",
+            parse_mode="HTML"
+        )
+        return
+    
     # Обновляем информацию о пользователях
     target_id = str(target_user.id)
     sender_id = str(sender_user.id)
@@ -369,8 +519,10 @@ async def add_plus_rep(message: types.Message):
     rep_db.update_user_info(target_id, target_user.username, target_user.first_name)
     rep_db.update_user_info(sender_id, sender_user.username, sender_user.first_name)
     
-    # Добавляем +rep
+    # Добавляем +rep и обновляем время
     plus, minus = rep_db.add_plus(target_id)
+    rep_db.update_rep_time(sender_id, target_id)  # Обновляем время КД
+    
     total = plus - minus
     
     # Формируем ответ
@@ -386,6 +538,7 @@ async def add_plus_rep(message: types.Message):
         f"   ❌ -rep: <b>{minus}</b>\n"
         f"   📈 Рейтинг: <b>{total}</b>\n"
         f"   {emoji} Уровень: <b>{get_reputation_level(plus, minus)}</b>\n\n"
+        f"⏰ Следующую репутацию этому пользователю можно будет дать через 1 час.\n"
         f"#PLUS_REP",
         parse_mode="HTML"
     )
@@ -406,6 +559,33 @@ async def add_minus_rep(message: types.Message):
         await message.reply("❗ <b>Нельзя изменять репутацию самому себе.</b>", parse_mode="HTML")
         return
     
+    # Проверяем КД
+    can_give, time_left, last_time = rep_db.can_give_rep(str(sender_user.id), str(target_user.id))
+    
+    if not can_give:
+        # Форматируем оставшееся время
+        hours = int(time_left // 3600)
+        minutes = int((time_left % 3600) // 60)
+        seconds = int(time_left % 60)
+        
+        time_str = ""
+        if hours > 0:
+            time_str += f"{hours}ч "
+        if minutes > 0:
+            time_str += f"{minutes}м "
+        if seconds > 0 or (hours == 0 and minutes == 0):
+            time_str += f"{seconds}с"
+        
+        await message.reply(
+            f"⏳ <b>Кулдаун!</b>\n\n"
+            f"Вы уже давали репутацию этому пользователю.\n"
+            f"Следующую репутацию можно будет дать через:\n"
+            f"<b>{time_str}</b>\n\n"
+            f"⏰ Кулдаун: 1 час",
+            parse_mode="HTML"
+        )
+        return
+    
     # Обновляем информацию о пользователях
     target_id = str(target_user.id)
     sender_id = str(sender_user.id)
@@ -413,8 +593,10 @@ async def add_minus_rep(message: types.Message):
     rep_db.update_user_info(target_id, target_user.username, target_user.first_name)
     rep_db.update_user_info(sender_id, sender_user.username, sender_user.first_name)
     
-    # Добавляем -rep
+    # Добавляем -rep и обновляем время
     plus, minus = rep_db.add_minus(target_id)
+    rep_db.update_rep_time(sender_id, target_id)  # Обновляем время КД
+    
     total = plus - minus
     
     # Формируем ответ
@@ -430,6 +612,7 @@ async def add_minus_rep(message: types.Message):
         f"   ❌ -rep: <b>{minus}</b>\n"
         f"   📈 Рейтинг: <b>{total}</b>\n"
         f"   {emoji} Уровень: <b>{get_reputation_level(plus, minus)}</b>\n\n"
+        f"⏰ Следующую репутацию этому пользователю можно будет дать через 1 час.\n"
         f"#MINUS_REP",
         parse_mode="HTML"
     )
