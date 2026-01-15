@@ -4,6 +4,7 @@ import json
 import os
 import re
 import time
+import random
 from datetime import datetime
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command, CommandObject
@@ -24,6 +25,53 @@ logging.basicConfig(
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
+
+
+# =================== АВТО-СООБЩЕНИЯ КОНФИГ ===================
+AUTO_MESSAGES_INTERVAL = 10800  # Секунды между сообщениями (180 сек = 3 минуты)
+AUTO_MESSAGES_CHAT_ID = -1003404332093  # ЗАМЕНИ на ID твоего чата/канала
+
+AUTO_MESSAGES = [
+    "💡 <b>Напоминание</b>\nОценивайте участников после сделок — это помогает поддерживать честную среду. #notoscam\n\n<code>[АВТОПОСТИНГ]</code>",
+    "📊 <b>Статистика сегодня</b>\nПроверьте /stats — посмотрите, как растёт сообщество.\n\n<code>[АВТОПОСТИНГ]</code>",
+    "⭐ <b>Как работает репутация?</b>\nПоложительные оценки повышают репутацию, отрицательные — понижают.\n\n<code>[АВТОПОСТИНГ]</code>",
+    "👥 <b>Проверяйте профили</b>\nПеред сделкой используйте /rep @username — убедитесь в надёжности.\n\n<code>[АВТОПОСТИНГ]</code>",
+    "🔒 <b>Безопасность</b>\nСообщество NOTOSCAM создано для минимизации рисков обмана.\n\n<code>[АВТОПОСТИНГ]</code>",
+    "⏰ <b>Кулдаун 1 час</b>\nВы можете ставить репутацию одному пользователю раз в час.\n\n<code>[АВТОПОСТИНГ]</code>",
+    "📈 <b>Повышайте рейтинг</b>\nЧем больше положительных оценок, тем выше доверие к вам.\n\n<code>[АВТОПОСТИНГ]</code>"
+]
+
+# =================== ФУНКЦИЯ АВТО-СООБЩЕНИЙ ===================
+
+async def send_auto_messages(bot: Bot):
+    """Функция для отправки авто-сообщений"""
+    logger.info(f"Запущена функция авто-сообщений. Интервал: {AUTO_MESSAGES_INTERVAL} секунд")
+    
+    # Для теста - отправка каждые 30 секунд
+    # AUTO_MESSAGES_INTERVAL = 30  # Раскомментируй для теста
+    
+    while True:
+        try:
+            # Ждем указанное время
+            await asyncio.sleep(AUTO_MESSAGES_INTERVAL)
+            
+            # Выбираем случайное сообщение
+            message = random.choice(AUTO_MESSAGES)
+            
+            # Отправляем сообщение
+            await bot.send_message(
+                chat_id=AUTO_MESSAGES_CHAT_ID,
+                text=message,
+                parse_mode="HTML"
+            )
+            
+            logger.info(f"[АВТО] Отправлено сообщение в чат {AUTO_MESSAGES_CHAT_ID}")
+            
+        except Exception as e:
+            logger.error(f"[АВТО] Ошибка отправки: {e}")
+            # Ждем перед следующей попыткой
+            await asyncio.sleep(60)  # 1 минута при ошибке
+
 
 # =================== БАЗА ДАННЫХ ===================
 
@@ -247,6 +295,7 @@ rep_db = ReputationDB()
 bans_db = BansDB()
 
 
+
 # =================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ===================
 
 def is_admin(user_id: int) -> bool:
@@ -328,21 +377,15 @@ def format_profile(user_id: str, user_data: dict) -> str:
         plus_percent = 0
     
     return (
-        f"{emoji} <b>NOTOSCAM РЕПУТАЦИИ</b>\n"
-        f"┌────────────────────\n"
-        f"├ 👤 <b>{first_name}{username_display}</b>\n"
-        f"├ 🆔 ID: <code>{user_id}</code>\n"
-        f"├────────────────────\n"
-        f"├ 📊 <b>СТАТИСТИКА:</b>\n"
-        f"├ ✅ Положительных: <b>{plus}</b>\n"
-        f"├ ❌ Отрицательных: <b>{minus}</b>\n"
-        f"├ 📈 Итоговый рейтинг: <b>{total}</b>\n"
-        f"├────────────────────\n"
-        f"├ {progress_bar}\n"
-        f"├ ✅ {plus_percent}%  ❌ {100-plus_percent}%\n"
-        f"├────────────────────\n"
-        f"└ 🏅 <b>УРОВЕНЬ:</b> {level}\n"
-        f"\n#NOTOSCAM_REPUTATION"
+        f"👤 <b>Профиль</b>\n"
+        f"├ Имя: {first_name}\n"
+        f"├ Юзернейм: @{username if username else '—'}\n"
+        f"├ ID: <code>{user_id}</code>\n\n"
+        f"⭐ <b>Репутация</b>\n"
+        f"├ +{plus} положительных\n"
+        f"├ -{minus} отрицательных\n"
+        f"└ Всего: {plus + minus}\n\n"
+        f"<i>#notoscam #профиль</i>"
     )
 
 
@@ -387,26 +430,24 @@ async def cmd_start(message: types.Message):
 
 @dp.message(Command("help"))
 async def cmd_help(message: types.Message):
-    """Команда /help"""
+    """Команда /help - минималистичная справочная информация"""
     help_text = (
-        "🔰 <b>NOTOSCAM РЕПУТАЦИИ - Список команд</b>\n"
-        "┌────────────────────\n"
-        "├ 📊 <b>КОМАНДЫ РЕПУТАЦИИ:</b>\n"
-        "├ /rep - Ваш профиль\n"
-        "├ /rep @username - Профиль пользователя\n"
-        "├ +rep - Дать +1 репутации (ответом)\n"
-        "├ -rep - Дать -1 репутации (ответом)\n"
-        "├ +реп / -реп - То же самое на русском\n"
-        "├────────────────────\n"
-        "├ 📋 <b>ИНФОРМАЦИЯ:</b>\n"
-        "├ /start - Начать работу с ботом\n"
-        "├ /help - Это сообщение\n"
-        "├────────────────────\n"
-        "└ 🔒 <b>ПРАВИЛА:</b>\n"
-        "• Нельзя менять репутацию самому себе\n"
-        "• Только админы могут использовать бан\n"
-        "• Репутация обновляется моментально\n"
-        "\n#NOTOSCAM_HELP"
+        "🔍 <b>Справка по командам</b>\n"
+        "└─ • • • ─┘\n\n"  # Легкий разделитель
+        
+        "👤 <b>Профиль</b>\n"
+        "├ /rep – ваш рейтинг\n"
+        "└ /rep @user – профиль другого\n\n"
+        
+        "⭐ <b>Оценки</b> (ответом на сообщение)\n"
+        "├ +rep или +реп – положительная\n"
+        "├ -rep или +реп – отрицательная\n"
+        "└ ⏱ Кулдаун: 1 час на пользователя\n\n"
+        
+        "📊 <b>Информация</b>\n"
+        "├ /start – приветствие\n"
+        "├ /stats – статистика\n"
+        "└ /help – эта справка"
     )
     
     await message.answer(help_text, parse_mode="HTML")
@@ -802,17 +843,22 @@ async def cmd_stats(message: types.Message):
     total_minus = sum(user.get("minus", 0) for user in rep_db.data.values())
     
     await message.answer(
-        f"📈 <b>СТАТИСТИКА NOTOSCAM РЕПУТАЦИИ</b>\n"
-        f"┌────────────────────\n"
-        f"├ 👥 Всего пользователей: <b>{total_users}</b>\n"
-        f"├ ✅ Всего +rep: <b>{total_plus}</b>\n"
-        f"├ ❌ Всего -rep: <b>{total_minus}</b>\n"
-        f"├ 🚫 Забанено: <b>{total_bans}</b>\n"
-        f"├────────────────────\n"
-        f"├ 🏆 Топ 5 по репутации:\n"
-        f"{get_top_users(rep_db.data)}\n"
-        f"└────────────────────\n"
-        f"\n#NOTOSCAM_STATS",
+        f"📊 <b>Статистика</b>\n\n"
+        
+        f"👥 <b>Пользователи</b>\n"
+        f"├ Всего: <code>{total_users}</code>\n"
+        f"├ Забанено: <code>{total_bans}</code>\n"
+        f"└ Активных: <code>{total_users - total_bans}</code>\n\n"
+        
+        f"⭐ <b>Оценки</b>\n"
+        f"├ Положительных: <code>+{total_plus}</code>\n"
+        f"├ Отрицательных: <code>-{total_minus}</code>\n"
+        f"└ Всего: <code>{total_plus + total_minus}</code>\n\n"
+        
+        f"🏆 <b>Топ-5 по репутации</b>\n"
+        f"{get_top_users(rep_db.data)}\n\n"
+        
+        f"<i>#notoscam #статистика</i>",
         parse_mode="HTML"
     )
 
@@ -856,9 +902,23 @@ async def main():
     logger.info("NOTOSCAM РЕПУТАЦИИ запущен!")
     logger.info(f"Пользователей в базе: {len(rep_db.data)}")
     logger.info(f"Забанено пользователей: {len(bans_db.data)}")
+    logger.info(f"Авто-сообщения каждые {AUTO_MESSAGES_INTERVAL} сек")
     logger.info("=" * 50)
     
-    await dp.start_polling(bot)
+    # Создаем фоновую задачу для авто-сообщений
+    auto_messages_task = asyncio.create_task(send_auto_messages(bot))
+    
+    try:
+        # Запускаем поллинг
+        await dp.start_polling(bot)
+    finally:
+        # Отменяем задачу при остановке бота
+        auto_messages_task.cancel()
+        try:
+            await auto_messages_task
+        except asyncio.CancelledError:
+            pass
+        logger.info("Авто-сообщения остановлены")
 
 
 if __name__ == "__main__":
