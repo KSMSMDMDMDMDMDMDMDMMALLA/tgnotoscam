@@ -14,6 +14,7 @@ from aiogram.enums import ChatMemberStatus
 # =================== КОНФИГУРАЦИЯ ===================
 TOKEN = "8449402978:AAHzm8IOWivnDUlCMxlngUtAnHEWeH_Ohz0"
 ADMIN_IDS = [1007247805]  # Замени на ID админов
+REPORT_ADMIN_ID = 1007247805  # Твой ID для получения репортов
 
 # Файлы базы данных
 REPUTATION_FILE = "reputation.json"
@@ -445,12 +446,109 @@ async def cmd_help(message: types.Message):
         "└ ⏱ Кулдаун: 1 час на пользователя\n\n"
         
         "📊 <b>Информация</b>\n"
+        "├ /report – жалоба на пользователя\n"
         "├ /start – приветствие\n"
         "├ /stats – статистика\n"
         "└ /help – эта справка"
     )
     
     await message.answer(help_text, parse_mode="HTML")
+
+
+@dp.message(Command("report"))
+async def cmd_report(message: types.Message, command: CommandObject):
+    """Команда /report - отправить жалобу на пользователя"""
+    
+    # Проверяем, отвечает ли на сообщение
+    if not message.reply_to_message:
+        await message.answer(
+            "❗ <b>Как отправить жалобу:</b>\n\n"
+            "1. <b>Ответьте на сообщение</b> пользователя, на которого жалуетесь\n"
+            "2. Напишите <code>/report причина</code>\n\n"
+            "<b>Пример:</b>\n"
+            "├ <code>/report спам</code>\n"
+            "├ <code>/report мошенничество</code>\n"
+            "└ <code>/report оскорбления</code>",
+            parse_mode="HTML"
+        )
+        return
+    
+    # Получаем пользователя, на которого жалуются
+    reported_user = message.reply_to_message.from_user
+    reporter_user = message.from_user
+    
+    # Получаем причину из аргументов
+    reason = command.args.strip() if command.args else "Причина не указана"
+    
+    # Сохраняем информацию о пользователях в базу
+    rep_db.update_user_info(str(reported_user.id), reported_user.username, reported_user.first_name)
+    rep_db.update_user_info(str(reporter_user.id), reporter_user.username, reporter_user.first_name)
+    
+    # Формируем информацию о чате
+    chat_info = ""
+    if message.chat.type in ["group", "supergroup"]:
+        chat_info = (
+            f"💬 <b>Чат:</b> {message.chat.title}\n"
+            f"🆔 ID чата: <code>{message.chat.id}</code>\n"
+        )
+    
+    # Формируем ссылку на сообщение
+    message_link = f"https://t.me/c/{str(message.chat.id)[4:]}/{message.reply_to_message.message_id}" if message.chat.type in ["group", "supergroup"] else ""
+    
+    # Формируем полное сообщение для админа
+    report_message = (
+        f"🚨 <b>НОВАЯ ЖАЛОБА</b>\n\n"
+        
+        f"👤 <b>На кого жалуются:</b>\n"
+        f"├ Имя: {reported_user.first_name}\n"
+        f"├ Юзернейм: @{reported_user.username if reported_user.username else '—'}\n"
+        f"└ ID: <code>{reported_user.id}</code>\n\n"
+        
+        f"👥 <b>Кто пожаловался:</b>\n"
+        f"├ Имя: {reporter_user.first_name}\n"
+        f"├ Юзернейм: @{reporter_user.username if reporter_user.username else '—'}\n"
+        f"└ ID: <code>{reporter_user.id}</code>\n\n"
+        
+        f"{chat_info}"
+        
+        f"📝 <b>Причина:</b> {reason}\n\n"
+        
+        f"⏰ <b>Время:</b> {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}\n"
+    )
+    
+    # Добавляем ссылку на сообщение, если есть
+    if message_link:
+        report_message += f"\n🔗 <a href='{message_link}'>Ссылка на сообщение</a>\n"
+    
+    report_message += "\n#REPORT"
+    
+    try:
+        # Отправляем жалобу админу в ЛС
+        await bot.send_message(
+            chat_id=REPORT_ADMIN_ID,
+            text=report_message,
+            parse_mode="HTML",
+            disable_web_page_preview=True
+        )
+        
+        # Подтверждаем пользователю, что жалоба отправлена
+        await message.reply(
+            f"✅ <b>Жалоба отправлена администратору</b>\n\n"
+            f"👤 На пользователя: {reported_user.first_name}\n"
+            f"📝 Причина: {reason}\n\n"
+            f"<i>Спасибо за бдительность!</i>",
+            parse_mode="HTML"
+        )
+        
+        logger.info(f"Отправлена жалоба от {reporter_user.id} на {reported_user.id}")
+        
+    except Exception as e:
+        logger.error(f"Ошибка отправки жалобы: {e}")
+        await message.reply(
+            "❌ <b>Не удалось отправить жалобу</b>\n\n"
+            "<i>Попробуйте позже или свяжитесь с администратором напрямую.</i>",
+            parse_mode="HTML"
+        )
 
 
 @dp.message(Command("rep"))
@@ -506,6 +604,12 @@ async def cmd_rep(message: types.Message, command: CommandObject = None):
     # Показываем профиль
     if target_user_data:
         profile_text = format_profile(target_user_id, target_user_data)
+        
+        # Проверяем, забанен ли пользователь
+        is_banned, ban_data = bans_db.is_banned(target_user_id)
+        if is_banned:
+            profile_text += f"\n\n🚫 <b>ЗАБАНЕН</b>\nПричина: {ban_data.get('reason', 'Не указана')}"
+        
         await message.answer(profile_text, parse_mode="HTML")
     else:
         await message.answer("❌ Пользователь не найден в базе данных.")
@@ -677,98 +781,64 @@ async def cmd_ban(message: types.Message, command: CommandObject):
         await message.answer("❌ <b>Мне нужны права администратора для этой команды.</b>", parse_mode="HTML")
         return
     
-    if not command.args:
-        await message.answer(
-            "❗ <b>Использование команды /ban:</b>\n\n"
-            "1. <b>Ответьте на сообщение</b> нарушителя:\n"
-            "   <code>/ban причина бана</code>\n\n"
-            "2. <b>Укажите юзернейм:</b>\n"
-            "   <code>/ban @username причина</code>\n\n"
-            "Пример: <code>/ban спам в чате</code>",
-            parse_mode="HTML"
-        )
-        return
-    
-    # Разбираем аргументы
-    args = command.args.strip()
-    
-    # Определяем целевого пользователя
-    target_user = None
-    
     # Если это ответ на сообщение
     if message.reply_to_message:
         target_user = message.reply_to_message.from_user
-        reason = args
-    
-    # Если указан юзернейм
-    elif args.startswith('@'):
-        parts = args.split(' ', 1)
-        if len(parts) < 2:
-            await message.answer("❗ <b>Укажите причину бана.</b>\nПример: <code>/ban @username спам</code>", parse_mode="HTML")
-            return
         
-        username = parts[0][1:]  # Убираем @
-        reason = parts[1]
+        # Получаем причину из аргументов или используем по умолчанию
+        reason = command.args.strip() if command.args else "Нарушение правил"
         
-        # Ищем пользователя в базе репутации
-        user_id, user_data = rep_db.find_by_username(username)
-        if not user_id:
-            await message.answer(f"❌ Пользователь @{username} не найден в базе.")
-            return
-        
-        # Создаем объект пользователя
-        target_user = types.User(
-            id=int(user_id),
-            first_name=user_data.get("first_name", "Пользователь"),
-            username=user_data.get("username")
-        )
+        try:
+            # Баним пользователя
+            await bot.ban_chat_member(
+                chat_id=message.chat.id,
+                user_id=target_user.id,
+                revoke_messages=True
+            )
+            
+            # Сохраняем в нашу базу
+            bans_db.ban_user(
+                user_id=str(target_user.id),
+                admin_id=str(message.from_user.id),
+                reason=reason
+            )
+            
+            # Обновляем информацию в базе репутации
+            rep_db.update_user_info(
+                str(target_user.id),
+                target_user.username,
+                target_user.first_name
+            )
+            
+            # Формируем сообщение
+            username_display = f" @{target_user.username}" if target_user.username else ""
+            
+            await message.answer(
+                f"🚫 <b>ПОЛЬЗОВАТЕЛЬ ЗАБАНЕН</b>\n\n"
+                f"👤 Пользователь: <b>{target_user.first_name}{username_display}</b>\n"
+                f"🆔 ID: <code>{target_user.id}</code>\n"
+                f"📝 Причина: <b>{reason}</b>\n"
+                f"👮 Администратор: <b>{message.from_user.first_name}</b>\n\n"
+                f"#USER_BANNED",
+                parse_mode="HTML"
+            )
+            
+        except Exception as e:
+            logger.error(f"Ошибка при бане: {e}")
+            await message.answer(f"❌ <b>Ошибка при бане:</b> {str(e)}", parse_mode="HTML")
     
     else:
-        await message.answer("❗ <b>Используйте команду:</b>\n1. Ответом на сообщение\n2. С указанием юзернейма", parse_mode="HTML")
-        return
-    
-    if not target_user:
-        await message.answer("❌ <b>Не удалось определить пользователя для бана.</b>", parse_mode="HTML")
-        return
-    
-    # Баним пользователя в Telegram
-    try:
-        await bot.ban_chat_member(
-            chat_id=message.chat.id,
-            user_id=target_user.id,
-            revoke_messages=True
-        )
-        
-        # Сохраняем в нашу базу
-        bans_db.ban_user(
-            user_id=str(target_user.id),
-            admin_id=str(message.from_user.id),
-            reason=reason
-        )
-        
-        # Обновляем информацию в базе репутации
-        rep_db.update_user_info(
-            str(target_user.id),
-            target_user.username,
-            target_user.first_name
-        )
-        
-        # Формируем сообщение
-        username_display = f" @{target_user.username}" if target_user.username else ""
-        
+        # Если не ответ на сообщение, показываем инструкцию
         await message.answer(
-            f"🚫 <b>ПОЛЬЗОВАТЕЛЬ ЗАБАНЕН</b>\n\n"
-            f"👤 Пользователь: <b>{target_user.first_name}{username_display}</b>\n"
-            f"🆔 ID: <code>{target_user.id}</code>\n"
-            f"📝 Причина: <b>{reason}</b>\n"
-            f"👮 Администратор: <b>{message.from_user.first_name}</b>\n\n"
-            f"#USER_BANNED",
+            "❗ <b>Как использовать команду /ban:</b>\n\n"
+            "1. <b>Ответьте на сообщение пользователя</b>, которого хотите забанить\n"
+            "2. Напишите: <code>/ban причина</code>\n\n"
+            "<b>Пример:</b>\n"
+            "├ <code>/ban спам в чате</code>\n"
+            "└ <code>/ban мошенничество</code>\n\n"
+            "<i>Для бана по юзернейму боту нужен реальный ID пользователя из Telegram.</i>",
             parse_mode="HTML"
         )
-        
-    except Exception as e:
-        logger.error(f"Ошибка при бане: {e}")
-        await message.answer(f"❌ <b>Ошибка при бане:</b> {str(e)}", parse_mode="HTML")
 
 
 @dp.message(Command("unban"))
@@ -787,49 +857,56 @@ async def cmd_unban(message: types.Message, command: CommandObject):
         return
     
     if not command.args:
-        await message.answer("❗ <b>Использование:</b> <code>/unban @username</code>", parse_mode="HTML")
+        await message.answer(
+            "❗ <b>Использование:</b> <code>/unban ID_пользователя</code>\n\n"
+            "<b>Пример:</b> <code>/unban 123456789</code>\n\n"
+            "<i>ID можно узнать командой /rep @username</i>",
+            parse_mode="HTML"
+        )
         return
     
     args = command.args.strip()
     
-    if not args.startswith('@'):
-        await message.answer("❗ <b>Укажите юзернейм:</b> <code>/unban @username</code>", parse_mode="HTML")
-        return
-    
-    username = args[1:]
-    
-    # Ищем пользователя в базе репутации
-    user_id, user_data = rep_db.find_by_username(username)
-    if not user_id:
-        await message.answer(f"❌ Пользователь @{username} не найден в базе.")
-        return
-    
-    # Разбаниваем в Telegram
-    try:
-        await bot.unban_chat_member(
-            chat_id=message.chat.id,
-            user_id=int(user_id),
-            only_if_banned=True
-        )
+    # Проверяем, является ли аргумент числом (ID пользователя)
+    if args.isdigit():
+        user_id = int(args)
         
-        # Удаляем из нашей базы
-        bans_db.unban_user(user_id)
-        
-        first_name = user_data.get("first_name", "Пользователь")
-        username_display = f" @{user_data.get('username')}" if user_data.get("username") else ""
-        
+        try:
+            # Пытаемся разбанить пользователя по ID
+            await bot.unban_chat_member(
+                chat_id=message.chat.id,
+                user_id=user_id,
+                only_if_banned=True
+            )
+            
+            # Удаляем из нашей базы
+            bans_db.unban_user(str(user_id))
+            
+            # Пытаемся найти имя пользователя в базе репутации
+            user_data = rep_db.get_user(str(user_id))
+            first_name = user_data.get("first_name", "Пользователь") if user_data else "Пользователь"
+            username = user_data.get("username") if user_data else None
+            username_display = f" @{username}" if username else ""
+            
+            await message.answer(
+                f"✅ <b>ПОЛЬЗОВАТЕЛЬ РАЗБАНЕН</b>\n\n"
+                f"👤 Пользователь: <b>{first_name}{username_display}</b>\n"
+                f"🆔 ID: <code>{user_id}</code>\n"
+                f"👮 Администратор: <b>{message.from_user.first_name}</b>\n\n"
+                f"#USER_UNBANNED",
+                parse_mode="HTML"
+            )
+            
+        except Exception as e:
+            logger.error(f"Ошибка при разбане: {e}")
+            await message.answer(f"❌ <b>Ошибка при разбане:</b> {str(e)}", parse_mode="HTML")
+    
+    else:
         await message.answer(
-            f"✅ <b>ПОЛЬЗОВАТЕЛЬ РАЗБАНЕН</b>\n\n"
-            f"👤 Пользователь: <b>{first_name}{username_display}</b>\n"
-            f"🆔 ID: <code>{user_id}</code>\n"
-            f"👮 Администратор: <b>{message.from_user.first_name}</b>\n\n"
-            f"#USER_UNBANNED",
+            "❗ <b>Укажите ID пользователя:</b> <code>/unban 123456789</code>\n\n"
+            "<i>ID можно узнать командой /rep @username</i>",
             parse_mode="HTML"
         )
-        
-    except Exception as e:
-        logger.error(f"Ошибка при разбане: {e}")
-        await message.answer(f"❌ <b>Ошибка при разбане:</b> {str(e)}", parse_mode="HTML")
 
 
 @dp.message(Command("stats"))
