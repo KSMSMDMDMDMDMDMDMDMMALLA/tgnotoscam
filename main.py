@@ -18,9 +18,9 @@ REPORT_ADMIN_ID = 1007247805  # Твой ID для получения репор
 
 # Настройки антиспама
 ANTISPAM_ENABLED = True  # Включить/выключить антиспам
-ANTISPAM_WINDOW = 30  # Секунды для отслеживания флуда
-ANTISPAM_WARN_LIMIT = 2  # Сообщений для предупреждения
-ANTISPAM_MUTE_LIMIT = 3  # Сообщений для мута
+ANTISPAM_WINDOW = 100  # Секунды для отслеживания флуда
+ANTISPAM_WARN_LIMIT = 4  # Сообщений для предупреждения
+ANTISPAM_MUTE_LIMIT = 9  # Сообщений для мута
 
 # Файлы базы данных
 REPUTATION_FILE = "reputation.json"
@@ -1381,4 +1381,5 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         logger.info("Бот остановлен пользователем.")
     except Exception as e:
+
         logger.error(f"Критическая ошибка: {e}")
