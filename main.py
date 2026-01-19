@@ -16,6 +16,12 @@ TOKEN = "8449402978:AAHzm8IOWivnDUlCMxlngUtAnHEWeH_Ohz0"
 ADMIN_IDS = [1007247805]  # Замени на ID админов
 REPORT_ADMIN_ID = 1007247805  # Твой ID для получения репортов
 
+# Настройки антиспама
+ANTISPAM_ENABLED = True  # Включить/выключить антиспам
+ANTISPAM_WINDOW = 30  # Секунды для отслеживания флуда
+ANTISPAM_WARN_LIMIT = 2  # Сообщений для предупреждения
+ANTISPAM_MUTE_LIMIT = 3  # Сообщений для мута
+
 # Файлы базы данных
 REPUTATION_FILE = "reputation.json"
 BANS_FILE = "bans.json"
@@ -47,9 +53,6 @@ AUTO_MESSAGES = [
 async def send_auto_messages(bot: Bot):
     """Функция для отправки авто-сообщений"""
     logger.info(f"Запущена функция авто-сообщений. Интервал: {AUTO_MESSAGES_INTERVAL} секунд")
-    
-    # Для теста - отправка каждые 30 секунд
-    # AUTO_MESSAGES_INTERVAL = 30  # Раскомментируй для теста
     
     while True:
         try:
@@ -288,13 +291,84 @@ class BansDB:
         return user_id in self.data, self.data.get(user_id)
 
 
+# =================== АНТИСПАМ СИСТЕМА ===================
+
+class AntispamDB:
+    """База данных для антиспама"""
+    
+    def __init__(self):
+        self.user_messages = {}  # {user_id: [timestamp1, timestamp2]}
+        self.muted_users = {}  # {user_id: unmute_time}
+        self.warned_users = {}  # {user_id: warn_time}
+    
+    def add_message(self, user_id: int):
+        """Добавить запись о сообщении пользователя"""
+        current_time = time.time()
+        
+        if user_id not in self.user_messages:
+            self.user_messages[user_id] = []
+        
+        # Удаляем старые записи (старше 30 секунд)
+        self.user_messages[user_id] = [
+            t for t in self.user_messages[user_id] 
+            if current_time - t < ANTISPAM_WINDOW
+        ]
+        
+        # Добавляем текущее время
+        self.user_messages[user_id].append(current_time)
+        
+        # Проверяем, не истекло ли предупреждение
+        if user_id in self.warned_users and current_time - self.warned_users[user_id] > 300:  # 5 минут
+            del self.warned_users[user_id]
+    
+    def check_spam(self, user_id: int) -> tuple:
+        """
+        Проверяет, является ли активность спамом
+        Возвращает: (is_spam, messages_count, action)
+        action: "warn", "mute", "ok"
+        """
+        if user_id not in self.user_messages:
+            return False, 0, "ok"
+        
+        messages_count = len(self.user_messages[user_id])
+        
+        if messages_count >= ANTISPAM_MUTE_LIMIT:
+            return True, messages_count, "mute"
+        elif messages_count >= ANTISPAM_WARN_LIMIT:
+            return True, messages_count, "warn"
+        else:
+            return False, messages_count, "ok"
+    
+    def mute_user(self, user_id: int, duration: int = 3600):
+        """Замутить пользователя"""
+        self.muted_users[user_id] = time.time() + duration
+        # Очищаем историю сообщений
+        if user_id in self.user_messages:
+            self.user_messages[user_id] = []
+    
+    def is_muted(self, user_id: int) -> tuple:
+        """Проверяет, замучен ли пользователь"""
+        if user_id in self.muted_users:
+            mute_until = self.muted_users[user_id]
+            if time.time() < mute_until:
+                time_left = int(mute_until - time.time())
+                return True, time_left
+            else:
+                del self.muted_users[user_id]
+        return False, 0
+    
+    def warn_user(self, user_id: int):
+        """Выдать предупреждение пользователю"""
+        self.warned_users[user_id] = time.time()
+
+
 # =================== ИНИЦИАЛИЗАЦИЯ ===================
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 rep_db = ReputationDB()
 bans_db = BansDB()
-
+antispam_db = AntispamDB()
 
 
 # =================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ===================
@@ -409,6 +483,121 @@ def format_cooldown_time(from_user_id: str, to_user_id: str) -> str:
         time_str += f"{seconds}с"
         
         return f"⏳ Кулдаун: {time_str}"
+
+
+# =================== АНТИСПАМ ХЕНДЛЕР ===================
+
+async def check_antispam(message: types.Message):
+    """Проверка сообщения на спам"""
+    # Пропускаем команды и админов
+    if message.text and message.text.startswith('/'):
+        return False
+    
+    if is_admin(message.from_user.id):
+        return False
+    
+    user_id = message.from_user.id
+    
+    # Проверяем, не замучен ли пользователь
+    is_muted, time_left = antispam_db.is_muted(user_id)
+    if is_muted:
+        try:
+            # Удаляем сообщение
+            await message.delete()
+            
+            # Отправляем уведомление в ЛС
+            hours = time_left // 3600
+            minutes = (time_left % 3600) // 60
+            seconds = time_left % 60
+            
+            time_str = ""
+            if hours > 0:
+                time_str += f"{hours}ч "
+            if minutes > 0:
+                time_str += f"{minutes}м "
+            time_str += f"{seconds}с"
+            
+            await bot.send_message(
+                user_id,
+                f"⏸ <b>Вы замучены!</b>\n\n"
+                f"Вы отправляете сообщения слишком часто.\n"
+                f"🔇 Мут истечет через: <b>{time_str}</b>\n\n"
+                f"<i>Соблюдайте правила чата</i>",
+                parse_mode="HTML"
+            )
+        except:
+            pass
+        return True
+    
+    # Добавляем запись о сообщении
+    if ANTISPAM_ENABLED:
+        antispam_db.add_message(user_id)
+        
+        # Проверяем на спам
+        is_spam, count, action = antispam_db.check_spam(user_id)
+        
+        if is_spam:
+            if action == "warn" and user_id not in antispam_db.warned_users:
+                # Первое предупреждение
+                antispam_db.warn_user(user_id)
+                
+                try:
+                    warning_msg = await message.reply(
+                        f"⚠️ <b>ПРЕДУПРЕЖДЕНИЕ</b>\n\n"
+                        f"@{message.from_user.username or message.from_user.first_name}, "
+                        f"вы отправляете сообщения слишком часто!\n"
+                        f"📊 Сообщений за 30 сек: <b>{count}</b>\n\n"
+                        f"<i>Следующее нарушение → мут на 1 час</i>",
+                        parse_mode="HTML"
+                    )
+                    
+                    # Удаляем предупреждение через 10 секунд
+                    await asyncio.sleep(10)
+                    await warning_msg.delete()
+                    
+                except:
+                    pass
+            
+            elif action == "mute":
+                # Выдаем мут
+                antispam_db.mute_user(user_id, 3600)  # 1 час
+                
+                try:
+                    # Удаляем сообщение
+                    await message.delete()
+                    
+                    # Отправляем уведомление о муте
+                    mute_msg = await message.answer(
+                        f"🔇 <b>ПОЛЬЗОВАТЕЛЬ ЗАМУЧЕН</b>\n\n"
+                        f"👤 Пользователь: @{message.from_user.username or message.from_user.first_name}\n"
+                        f"⏰ Мут на: <b>1 час</b>\n"
+                        f"📊 Нарушение: <b>флуд ({count} сообщений за 30 сек)</b>\n\n"
+                        f"<i>Автоматическая система антиспама</i>",
+                        parse_mode="HTML"
+                    )
+                    
+                    # Уведомляем пользователя в ЛС
+                    try:
+                        await bot.send_message(
+                            user_id,
+                            f"🔇 <b>Вы получили мут!</b>\n\n"
+                            f"Причина: <b>Флуд ({count} сообщений за 30 секунд)</b>\n"
+                            f"Длительность: <b>1 час</b>\n"
+                            f"Чат: <b>{message.chat.title if hasattr(message.chat, 'title') else 'личные сообщения'}</b>\n\n"
+                            f"<i>Соблюдайте правила общения</i>",
+                            parse_mode="HTML"
+                        )
+                    except:
+                        pass
+                    
+                    # Удаляем уведомление через 15 секунд
+                    await asyncio.sleep(15)
+                    await mute_msg.delete()
+                    
+                except Exception as e:
+                    logger.error(f"Ошибка при муте: {e}")
+    
+    return False
 
 
 # =================== ОБРАБОТЧИКИ КОМАНД ===================
@@ -618,6 +807,10 @@ async def cmd_rep(message: types.Message, command: CommandObject = None):
 @dp.message(lambda m: m.text and (m.text.lower().startswith('+rep') or m.text.lower().startswith('+реп')))
 async def add_plus_rep(message: types.Message):
     """Обработчик +rep / +реп"""
+    # Проверяем антиспам перед обработкой команды
+    if await check_antispam(message):
+        return
+    
     if not message.reply_to_message:
         await message.reply("❗ <b>Ответьте на сообщение пользователя</b>, которому хотите дать +rep.", parse_mode="HTML")
         return
@@ -692,6 +885,10 @@ async def add_plus_rep(message: types.Message):
 @dp.message(lambda m: m.text and (m.text.lower().startswith('-rep') or m.text.lower().startswith('-реп')))
 async def add_minus_rep(message: types.Message):
     """Обработчик -rep / -реп"""
+    # Проверяем антиспам перед обработкой команды
+    if await check_antispam(message):
+        return
+    
     if not message.reply_to_message:
         await message.reply("❗ <b>Ответьте на сообщение пользователя</b>, которому хотите дать -rep.", parse_mode="HTML")
         return
@@ -971,6 +1168,183 @@ def get_top_users(data: dict, limit: int = 5) -> str:
     return result
 
 
+# =================== КОМАНДЫ ДЛЯ УПРАВЛЕНИЯ АНТИСПАМОМ ===================
+
+@dp.message(Command("mute"))
+async def cmd_mute(message: types.Message, command: CommandObject):
+    """Замутить пользователя вручную"""
+    if not is_admin(message.from_user.id):
+        return
+    
+    if not message.reply_to_message:
+        await message.answer(
+            "❗ <b>Использование:</b>\n"
+            "Ответьте на сообщение пользователя:\n"
+            "<code>/mute время_в_секундах причина</code>\n\n"
+            "<b>Примеры:</b>\n"
+            "├ <code>/mute 3600 флуд</code> (1 час)\n"
+            "├ <code>/mute 300 спам</code> (5 минут)\n"
+            "└ <code>/mute 86400 нарушение правил</code> (1 день)",
+            parse_mode="HTML"
+        )
+        return
+    
+    target_user = message.reply_to_message.from_user
+    
+    if not command.args:
+        duration = 3600  # 1 час по умолчанию
+        reason = "Нарушение правил"
+    else:
+        args = command.args.strip().split(' ', 1)
+        try:
+            duration = int(args[0])
+            reason = args[1] if len(args) > 1 else "Нарушение правил"
+        except:
+            duration = 3600
+            reason = command.args
+    
+    # Мьют через антиспам систему
+    antispam_db.mute_user(target_user.id, duration)
+    
+    # Удаляем сообщение пользователя
+    try:
+        await message.reply_to_message.delete()
+    except:
+        pass
+    
+    # Уведомление в чат
+    hours = duration // 3600
+    minutes = (duration % 3600) // 60
+    
+    time_str = ""
+    if hours > 0:
+        time_str += f"{hours}ч "
+    if minutes > 0:
+        time_str += f"{minutes}м"
+    if not time_str:
+        time_str = f"{duration}с"
+    
+    await message.answer(
+        f"🔇 <b>ПОЛЬЗОВАТЕЛЬ ЗАМУЧЕН</b>\n\n"
+        f"👤 Пользователь: @{target_user.username or target_user.first_name}\n"
+        f"🆔 ID: <code>{target_user.id}</code>\n"
+        f"⏰ Длительность: <b>{time_str}</b>\n"
+        f"📝 Причина: <b>{reason}</b>\n"
+        f"👮 Администратор: <b>{message.from_user.first_name}</b>\n\n"
+        f"#USER_MUTED",
+        parse_mode="HTML"
+    )
+
+@dp.message(Command("unmute"))
+async def cmd_unmute(message: types.Message, command: CommandObject):
+    """Размутить пользователя"""
+    if not is_admin(message.from_user.id):
+        return
+    
+    if not command.args and not message.reply_to_message:
+        await message.answer(
+            "❗ <b>Использование:</b>\n"
+            "1. <code>/unmute @username</code>\n"
+            "2. Ответить на сообщение: <code>/unmute</code>",
+            parse_mode="HTML"
+        )
+        return
+    
+    target_user_id = None
+    
+    if message.reply_to_message:
+        target_user_id = message.reply_to_message.from_user.id
+    elif command.args and command.args.startswith('@'):
+        # Поиск по юзернейму в базе репутации
+        username = command.args[1:]
+        user_id, _ = rep_db.find_by_username(username)
+        if user_id:
+            target_user_id = int(user_id)
+        else:
+            await message.answer(f"❌ Пользователь @{username} не найден.")
+            return
+    
+    if target_user_id:
+        # Удаляем из списка замученных
+        if target_user_id in antispam_db.muted_users:
+            del antispam_db.muted_users[target_user_id]
+            await message.answer(f"✅ Пользователь размучен")
+        else:
+            await message.answer("ℹ️ Пользователь не был замучен")
+    else:
+        await message.answer("❌ Не удалось определить пользователя")
+
+@dp.message(Command("antispam"))
+async def cmd_antispam(message: types.Message):
+    """Информация о системе антиспама"""
+    if not is_admin(message.from_user.id):
+        return
+    
+    muted_count = len(antispam_db.muted_users)
+    warned_count = len(antispam_db.warned_users)
+    
+    # Список замученных пользователей
+    muted_list = ""
+    for user_id, mute_time in list(antispam_db.muted_users.items()):
+        time_left = int(mute_time - time.time())
+        if time_left > 0:
+            user_data = rep_db.get_user(str(user_id))
+            username = user_data.get("username", "")
+            name = user_data.get("first_name", f"ID: {user_id}")
+            
+            hours = time_left // 3600
+            minutes = (time_left % 3600) // 60
+            
+            time_str = ""
+            if hours > 0:
+                time_str += f"{hours}ч "
+            if minutes > 0:
+                time_str += f"{minutes}м"
+            if not time_str:
+                time_str = f"{time_left}с"
+            
+            muted_list += f"├ 👤 {name} (@{username}) - осталось: {time_str}\n"
+    
+    await message.answer(
+        f"🛡 <b>СИСТЕМА АНТИСПАМА</b>\n\n"
+        f"📊 <b>Статистика:</b>\n"
+        f"├ Статус: {'🟢 ВКЛЮЧЕН' if ANTISPAM_ENABLED else '🔴 ВЫКЛЮЧЕН'}\n"
+        f"├ Замучено: <b>{muted_count}</b> пользователей\n"
+        f"├ Предупреждений: <b>{warned_count}</b>\n"
+        f"└ Окно проверки: <b>{ANTISPAM_WINDOW}</b> секунд\n\n"
+        f"⚙️ <b>Настройки:</b>\n"
+        f"├ Предупреждение: {ANTISPAM_WARN_LIMIT} сообщ./{ANTISPAM_WINDOW}сек\n"
+        f"└ Мут: {ANTISPAM_MUTE_LIMIT} сообщ./{ANTISPAM_WINDOW}сек\n\n"
+        f"📋 <b>Замученные сейчас:</b>\n"
+        f"{muted_list if muted_list else '├ Нет замученных пользователей'}\n\n"
+        f"<i>Команды: /mute, /unmute</i>",
+        parse_mode="HTML"
+    )
+
+
+# =================== ОБРАБОТЧИК ВСЕХ СООБЩЕНИЙ (АНТИСПАМ) ===================
+
+@dp.message()
+async def handle_all_messages(message: types.Message):
+    """Обработчик всех сообщений для антиспама"""
+    # Пропускаем команды (они обрабатываются отдельными хендлерами)
+    if message.text and message.text.startswith('/'):
+        # Проверяем антиспам даже для команд
+        if await check_antispam(message):
+            return
+        
+        # Сообщение не является известной командой - показываем помощь
+        await message.answer(
+            "❓ <b>Неизвестная команда</b>\n\n"
+            "Используйте <code>/help</code> для просмотра всех доступных команд.",
+            parse_mode="HTML"
+        )
+        return
+    
+    # Проверяем обычные сообщения на антиспам
+    await check_antispam(message)
+
+
 # =================== ЗАПУСК БОТА ===================
 
 async def main():
@@ -980,6 +1354,9 @@ async def main():
     logger.info(f"Пользователей в базе: {len(rep_db.data)}")
     logger.info(f"Забанено пользователей: {len(bans_db.data)}")
     logger.info(f"Авто-сообщения каждые {AUTO_MESSAGES_INTERVAL} сек")
+    logger.info(f"Антиспам: {'ВКЛ' if ANTISPAM_ENABLED else 'ВЫКЛ'}")
+    logger.info(f"  - Окно: {ANTISPAM_WINDOW} сек")
+    logger.info(f"  - Лимиты: {ANTISPAM_WARN_LIMIT}/{ANTISPAM_MUTE_LIMIT}")
     logger.info("=" * 50)
     
     # Создаем фоновую задачу для авто-сообщений
