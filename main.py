@@ -10,6 +10,7 @@ from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command, CommandObject
 from aiogram.types import ChatPermissions
 from aiogram.enums import ChatMemberStatus
+from garant import GarantDB
 
 # =================== КОНФИГУРАЦИЯ ===================
 TOKEN = "8449402978:AAHzm8IOWivnDUlCMxlngUtAnHEWeH_Ohz0"
@@ -18,9 +19,9 @@ REPORT_ADMIN_ID = 1007247805  # Твой ID для получения репор
 
 # Настройки антиспама
 ANTISPAM_ENABLED = True  # Включить/выключить антиспам
-ANTISPAM_WINDOW = 100  # Секунды для отслеживания флуда
-ANTISPAM_WARN_LIMIT = 4  # Сообщений для предупреждения
-ANTISPAM_MUTE_LIMIT = 9  # Сообщений для мута
+ANTISPAM_WINDOW = 30  # Секунды для отслеживания флуда
+ANTISPAM_WARN_LIMIT = 2  # Сообщений для предупреждения
+ANTISPAM_MUTE_LIMIT = 3  # Сообщений для мута
 
 # Файлы базы данных
 REPUTATION_FILE = "reputation.json"
@@ -369,6 +370,7 @@ dp = Dispatcher()
 rep_db = ReputationDB()
 bans_db = BansDB()
 antispam_db = AntispamDB()
+garant_db = GarantDB()
 
 
 # =================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ===================
@@ -633,6 +635,10 @@ async def cmd_help(message: types.Message):
         "├ +rep или +реп – положительная\n"
         "├ -rep или +реп – отрицательная\n"
         "└ ⏱ Кулдаун: 1 час на пользователя\n\n"
+
+         "🛡 <b>Гарант</b>\n"
+        "├ /garant @продавец @покупатель сумма\n"
+        "└ /deal [ID] – проверка сделки\n\n"
         
         "📊 <b>Информация</b>\n"
         "├ /report – жалоба на пользователя\n"
@@ -1321,6 +1327,473 @@ async def cmd_antispam(message: types.Message):
         parse_mode="HTML"
     )
 
+def calculate_commission(amount_str: str) -> str:
+    """Рассчитывает комиссию 5% от суммы"""
+    try:
+        # Убираем все нецифровые символы, кроме точки и запятой
+        clean_amount = re.sub(r'[^\d.,]', '', amount_str)
+        clean_amount = clean_amount.replace(',', '.')
+        
+        if not clean_amount:
+            return "не удалось рассчитать"
+        
+        amount = float(clean_amount)
+        commission = amount * 0.05
+        
+        # Форматируем обратно
+        if '₽' in amount_str:
+            return f"{commission:.2f}₽"
+        elif '$' in amount_str:
+            return f"{commission:.2f}$"
+        elif '€' in amount_str:
+            return f"{commission:.2f}€"
+        else:
+            return f"{commission:.2f}"
+            
+    except:
+        return "не удалось рассчитать"
+
+def format_status(status: str) -> str:
+    """Форматирует статус сделки"""
+    status_map = {
+        "pending": "⏳ Ожидание гаранта",
+        "active": "🟢 Активна (гарант подключен)",
+        "completed": "✅ Завершена успешно",
+        "cancelled": "❌ Отменена"
+    }
+    return status_map.get(status, "Неизвестно")
+
+
+@dp.message(Command("garant"))
+async def cmd_garant(message: types.Message, command: CommandObject):
+    """Команда /garant - вызов гаранта для сделки"""
+    
+    if not command.args:
+        await message.answer(
+            "🛡 <b>Система Гаранта NOTOSCAM</b>\n\n"
+            "📝 <b>Формат команды:</b>\n"
+            "<code>/garant @продавец @покупатель сумма</code>\n\n"
+            "📋 <b>Примеры:</b>\n"
+            "├ <code>/garant @seller @buyer 1000₽</code>\n"
+            "├ <code>/garant @user1 @user2 500₽</code>\n"
+            "└ <code>/garant @username1 @username2 2500₽</code>\n\n"
+            "⚠️ <b>Важно:</b>\n"
+            "- Гарант нужен для безопасной сделки\n"
+            "- Администратор выступит посредником\n"
+            "<i>#гарант #безопасность #notoscam</i>",
+            parse_mode="HTML"
+        )
+        return
+    
+    args = command.args.strip().split()
+    
+    if len(args) < 3:
+        await message.answer(
+            "❌ <b>Недостаточно аргументов</b>\n\n"
+            "<b>Правильный формат:</b>\n"
+            "<code>/garant @продавец @покупатель сумма</code>\n\n"
+            "<b>Пример:</b>\n"
+            "<code>/garant @seller123 @buyer456 1500₽</code>",
+            parse_mode="HTML"
+        )
+        return
+    
+    seller_username = args[0]
+    buyer_username = args[1]
+    amount = " ".join(args[2:])
+    
+    # Проверяем, что указаны юзернеймы с @
+    if not seller_username.startswith('@') or not buyer_username.startswith('@'):
+        await message.answer(
+            "❌ <b>Некорректные юзернеймы</b>\n\n"
+            "Укажите юзернеймы с символом @:\n"
+            "<code>/garant @username1 @username2 сумма</code>",
+            parse_mode="HTML"
+        )
+        return
+    
+    # Проверяем, что пользователи существуют в базе
+    seller_id, seller_data = rep_db.find_by_username(seller_username[1:])
+    buyer_id, buyer_data = rep_db.find_by_username(buyer_username[1:])
+    
+    if not seller_id:
+        await message.answer(f"❌ Продавец {seller_username} не найден в базе.\nИспользуйте /rep {seller_username} для проверки.")
+        return
+    
+    if not buyer_id:
+        await message.answer(f"❌ Покупатель {buyer_username} не найден в базе.\nИспользуйте /rep {buyer_username} для проверки.")
+        return
+    
+    # Создаем сделку
+    try:
+        deal = garant_db.create_deal(
+            seller_username=seller_username,
+            buyer_username=buyer_username,
+            amount=amount,
+            initiator_id=message.from_user.id,
+            chat_id=message.chat.id,
+            message_id=message.message_id
+        )
+        
+        # Обновляем информацию о пользователях
+        rep_db.update_user_info(seller_id, seller_data.get("username"), seller_data.get("first_name"))
+        rep_db.update_user_info(buyer_id, buyer_data.get("username"), buyer_data.get("first_name"))
+        
+        # Получаем информацию о репутации
+        seller_plus = seller_data.get("plus", 0)
+        seller_minus = seller_data.get("minus", 0)
+        buyer_plus = buyer_data.get("plus", 0)
+        buyer_minus = buyer_data.get("minus", 0)
+        
+        # Рассчитываем комиссию
+        commission = calculate_commission(amount)
+        
+        # Формируем сообщение для админа
+        admin_message = (
+            f"🛡 <b>НОВАЯ СДЕЛКА С ГАРАНТОМ</b>\n\n"
+            f"🆔 <b>ID сделки:</b> <code>{deal['deal_id']}</code>\n"
+            f"⏰ <b>Время:</b> {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}\n\n"
+            
+            f"👤 <b>Продавец:</b>\n"
+            f"├ {seller_username}\n"
+            f"├ Имя: {seller_data.get('first_name', 'Неизвестно')}\n"
+            f"├ Репутация: ✅{seller_plus} ❌{seller_minus}\n"
+            f"└ ID: <code>{seller_id}</code>\n\n"
+            
+            f"👤 <b>Покупатель:</b>\n"
+            f"├ {buyer_username}\n"
+            f"├ Имя: {buyer_data.get('first_name', 'Неизвестно')}\n"
+            f"├ Репутация: ✅{buyer_plus} ❌{buyer_minus}\n"
+            f"└ ID: <code>{buyer_id}</code>\n\n"
+            
+            f"💰 <b>Сумма сделки:</b> <code>{amount}</code>\n"
+            
+            f"👥 <b>Инициатор вызова:</b>\n"
+            f"├ @{message.from_user.username or message.from_user.first_name}\n"
+            f"└ ID: <code>{message.from_user.id}</code>\n\n"
+            
+            f"💬 <b>Чат:</b> {message.chat.title if hasattr(message.chat, 'title') else 'Личные сообщения'}\n"
+            f"🆔 ID чата: <code>{message.chat.id}</code>\n\n"
+            
+            f"🔗 <b>Ссылки:</b>\n"
+            f"├ Продавец: https://t.me/{seller_username[1:]}\n"
+            f"├ Покупатель: https://t.me/{buyer_username[1:]}\n"
+            f"└ Сообщение: https://t.me/c/{str(message.chat.id)[4:]}/{message.message_id}\n\n"
+            
+            f"<i>Сделка ожидает подтверждения</i>\n"
+            f"#ГАРАНТ_СДЕЛКА #{deal['deal_id']}"
+        )
+        
+        # Отправляем уведомление админу
+        try:
+            await bot.send_message(
+                chat_id=REPORT_ADMIN_ID,
+                text=admin_message,
+                parse_mode="HTML",
+                disable_web_page_preview=False
+            )
+            
+            # Отмечаем что админ уведомлен
+            garant_db.set_admin_notified(deal['deal_id'])
+            
+        except Exception as e:
+            logger.error(f"Ошибка отправки уведомления гаранта админу: {e}")
+        
+        # Отвечаем пользователю
+        response = (
+            f"🛡 <b>ГАРАНТ ВЫЗВАН!</b>\n\n"
+            f"✅ <b>Сделка создана:</b>\n"
+            f"├ Продавец: {seller_username}\n"
+            f"├ Покупатель: {buyer_username}\n"
+            f"└ Сумма: <code>{amount}</code>\n\n"
+            
+            f"📋 <b>Детали:</b>\n"
+            f"├ ID сделки: <code>{deal['deal_id']}</code>\n"
+            f"└ Статус: ⏳ <b>Ожидание гаранта</b>\n\n"
+            
+            f"👮 <b>Администратор уведомлен</b>\n"
+            f"В ближайшее время с вами свяжутся для подтверждения сделки.\n\n"
+            
+            f"⚠️ <b>Внимание:</b>\n"
+            f"- Не переводите деньги до подтверждения гаранта\n"
+            f"- Общайтесь вежливо и четко\n"
+            f"- Сохраните ID сделки для связи\n\n"
+            
+            f"<i>#гарант #{deal['deal_id']}</i>"
+        )
+        
+        await message.answer(response, parse_mode="HTML")
+        
+        logger.info(f"Создана сделка с гарантом: {deal['deal_id']}")
+        
+    except Exception as e:
+        logger.error(f"Ошибка создания сделки с гарантом: {e}")
+        await message.answer(
+            "❌ <b>Ошибка создания сделки</b>\n\n"
+            f"<i>Техническая информация: {str(e)}</i>\n\n"
+            "Попробуйте позже или обратитесь к администратору.",
+            parse_mode="HTML"
+        )
+
+
+@dp.message(Command("deal"))
+async def cmd_deal(message: types.Message, command: CommandObject = None):
+    """Проверить статус сделки"""
+    if not command or not command.args:
+        # Показываем активные сделки пользователя
+        username = f"@{message.from_user.username}" if message.from_user.username else None
+        
+        if not username:
+            await message.answer("❌ У вас нет юзернейма в Telegram.")
+            return
+        
+        user_deals = garant_db.get_user_deals(username)
+        
+        if not user_deals:
+            await message.answer(
+                "📭 <b>У вас нет активных сделок</b>\n\n"
+                "Чтобы создать сделку с гарантом:\n"
+                "<code>/garant @продавец @покупатель сумма</code>",
+                parse_mode="HTML"
+            )
+            return
+        
+        response = "📋 <b>ВАШИ СДЕЛКИ</b>\n\n"
+        
+        for deal in user_deals[:5]:  # Показываем только 5 последних сделок
+            status_emoji = {
+                "pending": "⏳",
+                "active": "🟢",
+                "completed": "✅",
+                "cancelled": "❌"
+            }.get(deal["status"], "❓")
+            
+            response += (
+                f"{status_emoji} <b>Сделка {deal['deal_id']}</b>\n"
+                f"├ Продавец: {deal['seller_username']}\n"
+                f"├ Покупатель: {deal['buyer_username']}\n"
+                f"├ Сумма: <code>{deal['amount']}</code>\n"
+                f"└ Статус: <b>{format_status(deal['status'])}</b>\n\n"
+            )
+        
+        if len(user_deals) > 5:
+            response += f"<i>... и еще {len(user_deals) - 5} сделок</i>\n\n"
+        
+        response += "ℹ️ Для деталей конкретной сделки: <code>/deal ID_сделки</code>"
+        
+        await message.answer(response, parse_mode="HTML")
+        return
+    
+    # Проверка конкретной сделки по ID
+    deal_id = command.args.strip()
+    deal = garant_db.find_deal(deal_id)
+    
+    if not deal:
+        await message.answer(
+            f"❌ <b>Сделка не найдена</b>\n\n"
+            f"Сделка с ID <code>{deal_id}</code> не существует.\n"
+            f"Проверьте ID или используйте <code>/deal</code> для просмотра ваших сделок.",
+            parse_mode="HTML"
+        )
+        return
+    
+    # Форматируем статус
+    status_text = format_status(deal["status"])
+    status_emoji = {
+        "pending": "⏳",
+        "active": "🟢",
+        "completed": "✅",
+        "cancelled": "❌"
+    }.get(deal["status"], "❓")
+    
+    response = (
+        f"🛡 <b>ИНФОРМАЦИЯ О СДЕЛКЕ</b>\n\n"
+        f"{status_emoji} <b>Статус:</b> {status_text}\n"
+        f"🆔 <b>ID сделки:</b> <code>{deal['deal_id']}</code>\n"
+        f"⏰ <b>Создана:</b> {datetime.fromisoformat(deal['created_at']).strftime('%d.%m.%Y %H:%M')}\n\n"
+        
+        f"👤 <b>Продавец:</b> {deal['seller_username']}\n"
+        f"👤 <b>Покупатель:</b> {deal['buyer_username']}\n"
+        f"💰 <b>Сумма:</b> <code>{deal['amount']}</code>\n\n"
+    )
+    
+    if deal["status"] == "completed" and deal.get("completed_at"):
+        response += f"✅ <b>Завершена:</b> {datetime.fromisoformat(deal['completed_at']).strftime('%d.%m.%Y %H:%M')}\n\n"
+    elif deal["status"] == "cancelled" and deal.get("cancelled_at"):
+        reason = deal.get("cancelled_reason", "Причина не указана")
+        response += f"❌ <b>Отменена:</b> {datetime.fromisoformat(deal['cancelled_at']).strftime('%d.%m.%Y %H:%M')}\n"
+        response += f"📝 <b>Причина:</b> {reason}\n\n"
+    
+    if is_admin(message.from_user.id) and deal["status"] == "pending":
+        response += (
+            "⚡ <b>Команды для админа:</b>\n"
+            f"├ <code>/accept {deal['deal_id']}</code> - принять сделку\n"
+            f"├ <code>/complete {deal['deal_id']}</code> - завершить сделку\n"
+            f"└ <code>/cancel {deal['deal_id']} причина</code> - отменить\n"
+        )
+    
+    await message.answer(response, parse_mode="HTML")
+
+
+# =================== АДМИН КОМАНДЫ ДЛЯ УПРАВЛЕНИЯ СДЕЛКАМИ ===================
+
+@dp.message(Command("accept"))
+async def cmd_accept(message: types.Message, command: CommandObject):
+    """Принять сделку как гарант (только для админов)"""
+    if not is_admin(message.from_user.id):
+        return
+    
+    if not command.args:
+        await message.answer("Использование: /accept ID_сделки")
+        return
+    
+    deal_id = command.args.strip()
+    deal = garant_db.find_deal(deal_id)
+    
+    if not deal:
+        await message.answer(f"❌ Сделка {deal_id} не найдена.")
+        return
+    
+    if deal["status"] != "pending":
+        await message.answer(f"❌ Сделка уже в статусе: {deal['status']}")
+        return
+    
+    # Обновляем статус сделки
+    if garant_db.update_deal_status(deal_id, "active", message.from_user.id):
+        # Уведомляем в исходном чате
+        try:
+            notification = (
+                f"🟢 <b>ГАРАНТ ПОДКЛЮЧЕН!</b>\n\n"
+                f"Сделка <code>{deal_id}</code> принята администратором.\n"
+                f"👮 <b>Гарант:</b> @{message.from_user.username or message.from_user.first_name}\n\n"
+                f"ℹ️ <b>Дальнейшие действия:</b>\n"
+                f"1. Свяжитесь с гарантом в ЛС\n"
+                f"2. Обсудите детали перевода\n"
+                f"3. Следуйте инструкциям гаранта\n\n"
+                f"<i>Не переводите деньги до подтверждения гаранта!</i>"
+            )
+            
+            await bot.send_message(
+                chat_id=deal["chat_id"],
+                text=notification,
+                parse_mode="HTML"
+            )
+        except:
+            pass
+        
+        await message.answer(f"✅ Сделка {deal_id} принята. Статус изменен на 'active'.")
+    else:
+        await message.answer("❌ Ошибка обновления статуса сделки.")
+
+
+@dp.message(Command("complete"))
+async def cmd_complete(message: types.Message, command: CommandObject):
+    """Завершить сделку (только для админов)"""
+    if not is_admin(message.from_user.id):
+        return
+    
+    if not command.args:
+        await message.answer("Использование: /complete ID_сделки")
+        return
+    
+    deal_id = command.args.strip()
+    deal = garant_db.find_deal(deal_id)
+    
+    if not deal:
+        await message.answer(f"❌ Сделка {deal_id} не найдена.")
+        return
+    
+    if deal["status"] != "active":
+        await message.answer(f"❌ Сделка не активна. Текущий статус: {deal['status']}")
+        return
+    
+    # Обновляем статус сделки
+    if garant_db.update_deal_status(deal_id, "completed"):
+        # Уведомляем в исходном чате
+        try:
+            notification = (
+                f"✅ <b>СДЕЛКА ЗАВЕРШЕНА!</b>\n\n"
+                f"Сделка <code>{deal_id}</code> успешно завершена.\n"
+                f"💰 <b>Сумма:</b> {deal['amount']}\n"
+                f"👮 <b>Гарант:</b> @{message.from_user.username or message.from_user.first_name}\n\n"
+                f"⭐ <b>Не забудьте оценить друг друга:</b>\n"
+                f"├ <code>+rep</code> - если все прошло хорошо\n"
+                f"└ <code>-rep</code> - если были проблемы\n\n"
+                f"<i>Спасибо за использование NOTOSCAM Гаранта!</i>"
+            )
+            
+            await bot.send_message(
+                chat_id=deal["chat_id"],
+                text=notification,
+                parse_mode="HTML"
+            )
+        except:
+            pass
+        
+        await message.answer(f"✅ Сделка {deal_id} завершена. Статус изменен на 'completed'.")
+    else:
+        await message.answer("❌ Ошибка обновления статуса сделки.")
+
+
+@dp.message(Command("cancel"))
+async def cmd_cancel(message: types.Message, command: CommandObject):
+    """Отменить сделку (только для админов)"""
+    if not is_admin(message.from_user.id):
+        return
+    
+    if not command.args:
+        await message.answer("Использование: /cancel ID_сделки причина")
+        return
+    
+    args = command.args.strip().split(' ', 1)
+    if len(args) < 2:
+        await message.answer("Укажите причину отмены: /cancel ID_сделки причина")
+        return
+    
+    deal_id = args[0]
+    reason = args[1]
+    deal = garant_db.find_deal(deal_id)
+    
+    if not deal:
+        await message.answer(f"❌ Сделка {deal_id} не найдена.")
+        return
+    
+    if deal["status"] not in ["pending", "active"]:
+        await message.answer(f"❌ Сделка уже в статусе: {deal['status']}")
+        return
+    
+    # Обновляем статус сделки с причиной
+    if garant_db.update_deal_status(deal_id, "cancelled"):
+        # Добавляем причину отмены
+        for d in garant_db.data:
+            if d["deal_id"] == deal_id:
+                d["cancelled_reason"] = reason
+                break
+        garant_db._save_data()
+        
+        # Уведомляем в исходном чате
+        try:
+            notification = (
+                f"❌ <b>СДЕЛКА ОТМЕНЕНА</b>\n\n"
+                f"Сделка <code>{deal_id}</code> отменена администратором.\n"
+                f"📝 <b>Причина:</b> {reason}\n"
+                f"👮 <b>Гарант:</b> @{message.from_user.username or message.from_user.first_name}\n\n"
+                f"⚠️ <b>Внимание:</b>\n"
+                f"Не проводите перевод по отмененной сделке!\n\n"
+                f"<i>Если есть вопросы - обратитесь к администратору</i>"
+            )
+            
+            await bot.send_message(
+                chat_id=deal["chat_id"],
+                text=notification,
+                parse_mode="HTML"
+            )
+        except:
+            pass
+        
+        await message.answer(f"✅ Сделка {deal_id} отменена. Статус изменен на 'cancelled'.")
+    else:
+        await message.answer("❌ Ошибка обновления статуса сделки.")
 
 # =================== ОБРАБОТЧИК ВСЕХ СООБЩЕНИЙ (АНТИСПАМ) ===================
 
@@ -1381,5 +1854,4 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         logger.info("Бот остановлен пользователем.")
     except Exception as e:
-
         logger.error(f"Критическая ошибка: {e}")
